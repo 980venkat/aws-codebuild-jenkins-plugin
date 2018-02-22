@@ -55,30 +55,53 @@ public class S3DataManager {
         String sourceFilePath = workspace.getRemote();
         String zipFilePath = sourceFilePath.substring(0, sourceFilePath.lastIndexOf(File.separator)+1) + UUID.randomUUID().toString() + "-" + zipFileName;
         FilePath jenkinsZipFile = new FilePath(workspace, zipFilePath);
-        ZipOutputStream out = new ZipOutputStream(jenkinsZipFile.write());
+
+        OutputStream zipFileOutputStream = jenkinsZipFile.write();
+        ZipOutputStream out = new ZipOutputStream(zipFileOutputStream);
 
         try {
             zipSource(workspace, sourceFilePath, out, sourceFilePath);
         } finally {
             out.close();
+
+            if (zipFileOutputStream != null) {
+                zipFileOutputStream.close();
+            }
         }
 
         // Add MD5 checksum as S3 Object metadata
-        String zipFileMD5 = new String(org.apache.commons.codec.binary.Base64.encodeBase64(DigestUtils.md5(jenkinsZipFile.read())), "UTF-8");;
+        InputStream zipFileInputStream = jenkinsZipFile.read();
         ObjectMetadata objectMetadata = new ObjectMetadata();
-        objectMetadata.setContentMD5(zipFileMD5);
-        objectMetadata.setContentLength(jenkinsZipFile.length());
-        if(!sseAlgorithm.isEmpty()) {
-            objectMetadata.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+        String zipFileMD5;
+
+        try {
+            zipFileMD5 = new String(org.apache.commons.codec.binary.Base64.encodeBase64(DigestUtils.md5(zipFileInputStream)), "UTF-8");
+            objectMetadata.setContentMD5(zipFileMD5);
+            objectMetadata.setContentLength(jenkinsZipFile.length());
+            if(!sseAlgorithm.isEmpty()) {
+                objectMetadata.setSSEAlgorithm(ObjectMetadata.AES_256_SERVER_SIDE_ENCRYPTION);
+            }
+        } finally {
+            if (zipFileInputStream != null) {
+                zipFileInputStream.close();
+            }
         }
 
-        PutObjectRequest putObjectRequest = new PutObjectRequest(s3InputBucket, s3InputKey, jenkinsZipFile.read(), objectMetadata);
-        putObjectRequest.setMetadata(objectMetadata);
+        zipFileInputStream = jenkinsZipFile.read();
+        PutObjectRequest putObjectRequest;
+        PutObjectResult putObjectResult;
 
-        LoggingHelper.log(listener, "Uploading code to S3 at location " + putObjectRequest.getBucketName() + "/" + putObjectRequest.getKey() + ". MD5 checksum is " + zipFileMD5);
-        PutObjectResult putObjectResult = s3Client.putObject(putObjectRequest);
-
-        jenkinsZipFile.delete();
+        try {
+            putObjectRequest = new PutObjectRequest(s3InputBucket, s3InputKey, zipFileInputStream, objectMetadata);
+            putObjectRequest.setMetadata(objectMetadata);
+            LoggingHelper.log(listener, "Uploading code to S3 at location " + putObjectRequest.getBucketName() + "/" + putObjectRequest.getKey() + ". MD5 checksum is " + zipFileMD5);
+            putObjectResult = s3Client.putObject(putObjectRequest);
+        } finally {
+            if (zipFileInputStream != null) {
+                zipFileInputStream.close();
+            }
+            jenkinsZipFile.delete();
+        }
 
         return new UploadToS3Output(putObjectRequest.getBucketName() + "/" + putObjectRequest.getKey(), putObjectResult.getVersionId());
     }
